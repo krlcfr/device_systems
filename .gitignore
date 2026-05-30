@@ -8,3 +8,9 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Documentación interna (no se sube al repo)
+docs/
+
+# Antigravity CLI
+.antigravitycli/
