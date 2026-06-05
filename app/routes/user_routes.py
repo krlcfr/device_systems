@@ -1,71 +1,98 @@
-from fastapi import APIRouter, HTTPException, Response
-from app.schemas.user_schema import UserCreate, UserResponse, UserRole
+from fastapi import APIRouter, Depends, Response
 from typing import Optional
 
-router = APIRouter()
+from app.schemas.user_schema import UserCreate, UserUpdate, UserPartialUpdate, UserResponse, UserRole
+from app.services.user_service import (
+    get_all_users,
+    create_user,
+    update_user,
+    partial_update_user,
+    delete_user,
+)
+from app.dependencies.user_dependencies import get_user_or_404
 
-# Lista en memoria que actua como base de datos temporal
-fake_db = [
-    {"id": 1, "name": "Arthur Pendragon", "email": "arthur@mail.com", "role": "admin", "is_active": True},
-    {"id": 2, "name": "Santiago Pinzon", "email": "santiago@mail.com", "role": "support", "is_active": True},
-    {"id": 3, "name": "Laura Mesa", "email": "laura@mail.com", "role": "user", "is_active": False},
-    {"id": 4, "name": "Carlos Rios", "email": "carlos@mail.com", "role": "user", "is_active": True},
-]
+router = APIRouter(prefix="/users", tags=["Users"])
+
 
 # Funcion auxiliar que agrega las cabeceras personalizadas a cualquier respuesta
 def set_custom_headers(response: Response):
     response.headers["X-App-Name"] = "device_systems"
-    response.headers["X-API-Version"] = "1.0"
+    response.headers["X-API-Version"] = "2.0"
 
 
 # Devuelve todos los usuarios, con filtros opcionales por rol y estado
-@router.get("/users", response_model=list[UserResponse])
+@router.get(
+    "/",
+    response_model=list[UserResponse],
+    summary="Listar usuarios",
+    description="Devuelve la lista completa de usuarios. Permite filtrar por rol y por estado activo o inactivo.",
+    response_description="Lista de usuarios encontrados",
+)
 def get_users(response: Response, role: Optional[UserRole] = None, is_active: Optional[bool] = None):
     set_custom_headers(response)
-    result = fake_db
-
-    # Si mandan el filtro de rol, filtra por ese rol
-    if role is not None:
-        result = [u for u in result if u["role"] == role.value]
-
-    # Si mandan el filtro de estado, filtra activos o inactivos
-    if is_active is not None:
-        result = [u for u in result if u["is_active"] == is_active]
-
-    return result
+    return get_all_users(role=role, is_active=is_active)
 
 
-# Devuelve un usuario especifico por su id
-# Si no existe lanza un error 404
-@router.get("/users/{user_id}", response_model=UserResponse)
-def get_user(user_id: int, response: Response):
+# Devuelve un usuario especifico por su id usando la dependencia get_user_or_404
+@router.get(
+    "/{user_id}",
+    response_model=UserResponse,
+    summary="Consultar usuario por ID",
+    description="Busca y devuelve un usuario por su ID. Si no existe responde con 404.",
+    response_description="Usuario encontrado",
+)
+def get_user(response: Response, user: dict = Depends(get_user_or_404)):
     set_custom_headers(response)
-    for user in fake_db:
-        if user["id"] == user_id:
-            return user
-    raise HTTPException(status_code=404, detail="User not found")
+    return user
 
 
-# Crea un nuevo usuario y lo agrega a la lista
-# Rechaza el registro si el email ya existe en la base de datos
-@router.post("/users", response_model=UserResponse, status_code=201)
-def create_user(user: UserCreate, response: Response):
+# Crea un nuevo usuario validando los datos de entrada con Pydantic
+@router.post(
+    "/",
+    response_model=UserResponse,
+    status_code=201,
+    summary="Crear usuario",
+    description="Registra un nuevo usuario. Valida formato de email, rol permitido y que el correo no este duplicado.",
+    response_description="Usuario creado exitosamente",
+)
+def post_user(user: UserCreate, response: Response):
     set_custom_headers(response)
-    for existing in fake_db:
-        if existing["email"] == user.email:
-            raise HTTPException(status_code=400, detail="Email already registered")
+    return create_user(user)
 
-    # Genera el id sumando 1 al ultimo id de la lista
-    new_id = fake_db[-1]["id"] + 1
 
-    new_user = {
-        "id": new_id,
-        "name": user.name,
-        "email": user.email,
-        "role": user.role.value,
-        "is_active": user.is_active,
-    }
+# Reemplaza completamente un usuario existente
+@router.put(
+    "/{user_id}",
+    response_model=UserResponse,
+    summary="Actualizar usuario completo",
+    description="Reemplaza todos los campos de un usuario existente. Requiere enviar todos los campos. Si no existe responde con 404.",
+    response_description="Usuario actualizado",
+)
+def put_user(user_id: int, data: UserUpdate, response: Response):
+    set_custom_headers(response)
+    return update_user(user_id, data)
 
-    fake_db.append(new_user)
 
-    return new_user
+# Actualiza parcialmente un usuario, solo los campos que el cliente manda
+@router.patch(
+    "/{user_id}",
+    response_model=UserResponse,
+    summary="Actualizar usuario parcialmente",
+    description="Modifica solo los campos enviados. Si no se envia ningun campo responde con 400. Si no existe responde con 404.",
+    response_description="Usuario actualizado parcialmente",
+)
+def patch_user(user_id: int, data: UserPartialUpdate, response: Response):
+    set_custom_headers(response)
+    return partial_update_user(user_id, data)
+
+
+# Elimina un usuario existente y responde con 204 sin cuerpo de respuesta
+@router.delete(
+    "/{user_id}",
+    status_code=204,
+    summary="Eliminar usuario",
+    description="Elimina un usuario por su ID. Si no existe responde con 404. No retorna cuerpo en la respuesta.",
+    response_description="Usuario eliminado exitosamente",
+)
+def remove_user(user_id: int):
+    delete_user(user_id)
