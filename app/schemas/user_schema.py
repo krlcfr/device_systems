@@ -1,5 +1,6 @@
 from pydantic import BaseModel, EmailStr, Field
 from typing import Optional
+from datetime import datetime
 from enum import Enum
 
 
@@ -10,7 +11,7 @@ class UserRole(str, Enum):
     user = "user"
 
 
-# Molde de entrada, define lo que el cliente debe mandar al crear un usuario
+# Molde de entrada para crear un usuario
 class UserCreate(BaseModel):
     # Minimo 3 caracteres
     name: str = Field(min_length=3)
@@ -22,7 +23,7 @@ class UserCreate(BaseModel):
     is_active: bool = Field(default=True)
 
 
-# Molde de entrada para PUT, igual que UserCreate pero deja claro que es una actualizacion completa
+# Molde de entrada para PUT, reemplaza el usuario completo
 class UserUpdate(BaseModel):
     name: str = Field(min_length=3)
     email: EmailStr
@@ -40,10 +41,13 @@ class UserPartialUpdate(BaseModel):
 
 
 # Molde de salida, define lo que la API devuelve
-# incluye el id que asigna el sistema, el cliente nunca lo manda
+# from_attributes permite que Pydantic lea directamente los atributos del modelo SQLAlchemy
 class UserResponse(BaseModel):
     id: int
     name: str
     email: EmailStr
     role: UserRole
     is_active: bool
+    created_at: datetime
+
+    model_config = {"from_attributes": True}

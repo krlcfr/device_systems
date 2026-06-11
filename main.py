@@ -1,8 +1,7 @@
 from fastapi import FastAPI
 from app.routes.user_routes import router as user_router
+from app.database.connection import create_tables
 
-# Metadatos que aparecen en el Swagger y en el ReDoc
-# description acepta markdown para darle formato a la pagina de documentacion
 description = """
 ## device_systems API
 
@@ -25,7 +24,6 @@ API REST para la gestion de usuarios del sistema device_systems.
 | 201 | Usuario creado |
 | 204 | Usuario eliminado |
 | 400 | Datos invalidos o correo duplicado |
-| 401 | API key invalida |
 | 404 | Usuario no encontrado |
 | 422 | Error de validacion Pydantic |
 """
@@ -34,15 +32,18 @@ API REST para la gestion de usuarios del sistema device_systems.
 app = FastAPI(
     title="device_systems",
     description=description,
-    version="2.0",
+    version="3.0",
     contact={
-        "name": "Arthur",
+        "name": "Arthur Pendragon",
         "email": "arthur@mail.com",
     },
     license_info={
         "name": "MIT",
     },
 )
+
+# Crea las tablas en la base de datos al iniciar la aplicacion si no existen todavia
+create_tables()
 
 # Conecta las rutas de usuarios a la aplicacion principal
 app.include_router(user_router)
@@ -51,4 +52,4 @@ app.include_router(user_router)
 # Endpoint raiz, solo sirve para confirmar que el servidor esta corriendo
 @app.get("/", tags=["Root"])
 def root():
-    return {"message": "device_systems API running", "version": "2.0"}
+    return {"message": "device_systems API running", "version": "3.0"}
