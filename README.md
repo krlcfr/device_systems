@@ -1,18 +1,19 @@
 # device_systems
 
-API REST construida con FastAPI, SQLAlchemy y Python para gestionar usuarios del sistema device_systems.
-Esta es la version 3.0 del proyecto, donde se reemplazo el almacenamiento en memoria por una base de
-datos real usando SQLAlchemy con SQLite, manteniendo el CRUD completo de las versiones anteriores.
+API REST construida con FastAPI, SQLAlchemy y Alembic para gestionar usuarios, dispositivos
+y prestamos en el sistema device_systems. Esta es la version 4.0 del proyecto, donde se
+agregaron relaciones entre modelos, migraciones controladas con Alembic y consultas
+avanzadas con joins y filtros.
 
 ---
 
 ## Que hace este proyecto
 
-device_systems permite crear, consultar, actualizar y eliminar usuarios de un sistema.
-Cada usuario tiene nombre, correo, rol, estado y fecha de creacion. Los datos persisten en una
-base de datos real, lo que significa que sobreviven reinicios del servidor. La API valida
-automaticamente los datos de entrada, responde con codigos HTTP correctos y organiza su
-logica en capas separadas.
+device_systems permite administrar tres recursos relacionados entre si: usuarios, dispositivos
+tecnologicos y los prestamos que los conectan. Un usuario puede solicitar el prestamo de un
+dispositivo disponible, y al devolverlo el dispositivo vuelve a quedar libre para otro prestamo.
+La API valida automaticamente los datos, aplica reglas de negocio sobre disponibilidad y permite
+consultar la informacion combinada entre las tres tablas mediante joins.
 
 ---
 
@@ -21,6 +22,7 @@ logica en capas separadas.
 - Python 3.13
 - FastAPI
 - SQLAlchemy
+- Alembic
 - Pydantic v2
 - SQLite
 - Uvicorn
@@ -33,10 +35,11 @@ logica en capas separadas.
 ```bash
 git clone <url-del-repositorio>
 cd device_systems
+git checkout device_systems_alembic_relaciones
 uv sync
 ```
 
-Las dependencias del proyecto estan definidas en `pyproject.toml`.
+Las dependencias del proyecto estan definidas en `pyproject.toml`, gestionadas con `uv`.
 
 ---
 
@@ -45,9 +48,6 @@ Las dependencias del proyecto estan definidas en `pyproject.toml`.
 ```bash
 uv run uvicorn main:app --reload
 ```
-
-La primera vez que corre el servidor se crea automaticamente el archivo `device_systems.db`
-en la raiz del proyecto con la tabla `users` lista para usar.
 
 Una vez corriendo lo encuentras en:
 
@@ -65,282 +65,404 @@ device_systems/
 │   ├── database/
 │   │   └── connection.py        # Engine, SessionLocal y Base declarativa
 │   ├── dependencies/
-│   │   └── database_dependency.py # Dependencia que entrega la sesion de BD
+│   │   └── database_dependency.py
 │   ├── models/
-│   │   └── user_model.py        # Modelo SQLAlchemy que representa la tabla users
-│   ├── routes/
-│   │   └── user_routes.py       # Definicion de endpoints
+│   │   ├── user_model.py        # Modelo User, relacion con Loan
+│   │   ├── device_model.py      # Modelo Device, relacion con Loan
+│   │   └── loan_model.py        # Modelo Loan, relacion con User y Device
 │   ├── schemas/
-│   │   └── user_schema.py       # Modelos Pydantic de entrada y salida
+│   │   ├── user_schema.py
+│   │   ├── device_schema.py
+│   │   └── loan_schema.py       # Incluye LoanDetailResponse para joins
+│   ├── routes/
+│   │   ├── user_routes.py
+│   │   ├── device_routes.py
+│   │   └── loan_routes.py
 │   └── services/
-│       └── user_service.py      # Logica de negocio con queries SQLAlchemy
+│       ├── user_service.py
+│       ├── device_service.py
+│       └── loan_service.py      # Logica de negocio y consultas con joins
+├── alembic/
+│   ├── versions/                # Migraciones generadas
+│   └── env.py                   # Configurado para reconocer los 3 modelos
+├── alembic.ini
 ├── main.py
 ├── pyproject.toml
-├── device_systems.db            # Base de datos SQLite generada automaticamente
+├── device_systems.db
 └── README.md
 ```
 
 ---
 
-## Diferencia entre modelo SQLAlchemy y schema Pydantic
+## Modelo de datos y relaciones
 
-Son dos cosas distintas con responsabilidades distintas que trabajan juntas.
+```
+User (1) ----< (N) Loan (N) >---- (1) Device
+```
 
-El **modelo SQLAlchemy** representa la tabla en la base de datos. Define las columnas,
-los tipos de datos y las restricciones. SQLAlchemy lo usa para crear la tabla y ejecutar
-las consultas. No sabe nada de la API.
+Un usuario puede tener muchos prestamos. Un dispositivo puede aparecer en muchos prestamos
+historicos. Cada prestamo pertenece exactamente a un usuario y a un dispositivo.
 
-El **schema Pydantic** define la forma que tienen los datos que entran y salen por la API.
-Pydantic lo usa para validar que los datos del cliente sean correctos antes de tocar la BD,
-y para darle forma a lo que la API devuelve. No sabe nada de la base de datos.
+Las relaciones se definen con `ForeignKey()` para las columnas reales en la base de datos,
+y con `relationship()` mas `back_populates` para navegar entre objetos en Python sin
+escribir consultas manuales:
 
-En resumen: SQLAlchemy habla con la BD, Pydantic habla con el cliente. FastAPI los conecta.
+```python
+usuario.loans          # todos los prestamos de ese usuario
+dispositivo.loans      # todos los prestamos de ese dispositivo
+prestamo.user.name      # nombre del usuario del prestamo
+prestamo.device.name    # nombre del dispositivo del prestamo
+```
+
+![Diagrama de relaciones](image/relaciones.png)
 
 ---
 
-## Capturas de la estructura del proyecto
+## Migraciones con Alembic
 
-![Estructura del proyecto](image/project_structure.png)
+### Inicializacion
+
+```bash
+uv run alembic init alembic
+```
+
+![alembic init](image/alembic_init.png)
+
+### Configuracion
+
+Se edito `alembic.ini` para apuntar a la base de datos del proyecto:
+
+```ini
+sqlalchemy.url = sqlite:///./device_systems.db
+```
+
+Y `alembic/env.py` para reconocer la Base declarativa y los tres modelos:
+
+```python
+from app.database.connection import Base
+from app.models.user_model import User
+from app.models.device_model import Device
+from app.models.loan_model import Loan
+
+target_metadata = Base.metadata
+```
+
+### Migracion inicial (baseline)
+
+Como la tabla `users` ya existia antes de instalar Alembic, se genero una migracion base
+y se marco como aplicada sin ejecutarla, para sincronizar el historial sin tocar los datos:
+
+```bash
+uv run alembic revision --autogenerate -m "baseline users table"
+uv run alembic stamp head
+```
+
+### Migracion de las tablas nuevas
+
+```bash
+uv run alembic revision --autogenerate -m "create devices and loans tables"
+```
+
+![alembic revision](image/alembic_revision.png)
+
+```bash
+uv run alembic upgrade head
+```
+
+![alembic upgrade](image/alembic_upgrade.png)
+
+### Historial de migraciones
+
+```bash
+uv run alembic history
+```
+
+![alembic history](image/alembic_history.png)
+
+```
+<base> -> f9b3ea0a77a4, baseline users table
+f9b3ea0a77a4 -> d9a68d1c2c56 (head), create devices and loans tables
+```
+
+---
+
+## Estructura de tablas generadas
+
+![Tablas en la base de datos](image/database_tables.png)
 
 ---
 
 ## Endpoints disponibles
 
-| Metodo | Ruta                      | Que hace                             | Codigo exitoso |
-|--------|---------------------------|--------------------------------------|----------------|
-| GET    | /                         | Confirma que el servidor esta vivo   | 200            |
-| GET    | /users                    | Trae todos los usuarios              | 200            |
-| GET    | /users?role=admin         | Filtra usuarios por rol              | 200            |
-| GET    | /users?is_active=true     | Filtra por estado                    | 200            |
-| GET    | /users?order_by=created_at| Ordena por fecha de creacion         | 200            |
-| GET    | /users/{user_id}          | Trae un usuario por su ID            | 200            |
-| POST   | /users                    | Crea un usuario nuevo                | 201            |
-| PUT    | /users/{user_id}          | Reemplaza un usuario completo        | 200            |
-| PATCH  | /users/{user_id}          | Modifica campos especificos          | 200            |
-| DELETE | /users/{user_id}          | Elimina un usuario                   | 204            |
+### Users
+
+| Metodo | Ruta                  | Que hace                                  |
+|--------|-----------------------|--------------------------------------------|
+| GET    | /users                | Lista usuarios con filtros                  |
+| GET    | /users/{user_id}      | Consulta un usuario por ID                  |
+| POST   | /users                | Crea un usuario                             |
+| PUT    | /users/{user_id}      | Reemplaza un usuario completo               |
+| PATCH  | /users/{user_id}      | Modifica campos especificos                 |
+| DELETE | /users/{user_id}      | Elimina un usuario                          |
+| GET    | /users/{user_id}/loans| Historial de prestamos de ese usuario       |
+
+### Devices
+
+| Metodo | Ruta                      | Que hace                              |
+|--------|---------------------------|----------------------------------------|
+| GET    | /devices                  | Lista dispositivos con filtros          |
+| GET    | /devices/{device_id}      | Consulta un dispositivo por ID          |
+| POST   | /devices                  | Crea un dispositivo                     |
+| PUT    | /devices/{device_id}      | Reemplaza un dispositivo completo       |
+| PATCH  | /devices/{device_id}      | Modifica campos especificos             |
+| DELETE | /devices/{device_id}      | Elimina un dispositivo                  |
+| GET    | /devices/{device_id}/loans| Historial de prestamos de ese dispositivo |
+
+Filtros disponibles en `/devices`:
+- `?device_type=laptop`
+- `?is_available=true`
+- `?brand=lenovo`
+- `?search=thinkpad` (busca en nombre, serial y marca)
+
+### Loans
+
+| Metodo | Ruta                    | Que hace                                          |
+|--------|--------------------------|----------------------------------------------------|
+| GET    | /loans                   | Lista prestamos con filtros                         |
+| GET    | /loans/details           | Lista prestamos con datos de usuario y dispositivo  |
+| GET    | /loans/{loan_id}         | Consulta un prestamo por ID                         |
+| POST   | /loans                   | Crea un prestamo, valida usuario y disponibilidad   |
+| PATCH  | /loans/{loan_id}/return  | Marca el prestamo como devuelto y libera el equipo  |
+
+Filtros disponibles:
+- `/loans?status=active`
+- `/loans?user_id=1`
+- `/loans?device_id=3`
+- `/loans/details?status=active`
+- `/loans/details?user_email=ana@mail.com`
+- `/loans/details?device_type=laptop`
 
 ---
 
 ## Codigos de estado usados
 
-| Codigo | Cuando ocurre                                      |
-|--------|----------------------------------------------------|
-| 200    | Operacion exitosa                                  |
-| 201    | Usuario creado exitosamente                        |
-| 204    | Usuario eliminado, sin cuerpo de respuesta         |
-| 400    | Correo duplicado o PATCH enviado sin campos        |
-| 404    | Usuario no encontrado                              |
-| 422    | Datos invalidos segun las reglas de Pydantic       |
+| Codigo | Cuando ocurre                                              |
+|--------|-------------------------------------------------------------|
+| 200    | Operacion exitosa                                            |
+| 201    | Registro creado exitosamente                                 |
+| 204    | Eliminacion exitosa, sin cuerpo de respuesta                |
+| 400    | Dato duplicado (email o numero de serie) o PATCH vacio      |
+| 404    | Usuario, dispositivo o prestamo no encontrado                |
+| 409    | Dispositivo no disponible, o prestamo ya devuelto            |
+| 422    | Datos invalidos o filtro con valor fuera de lo permitido     |
 
 ---
 
-## Ejemplos de peticiones y respuestas
+## Flujo completo de un prestamo
 
-### GET /users
+### 1. Crear usuario y dispositivo
 
-```http
-GET http://127.0.0.1:8000/users
-```
+![Crear usuario](image/create_user.png)
+![Crear dispositivo](image/create_device.png)
 
-![GET /users](image/get_users.png)
-
----
-
-### GET /users/{user_id}
-
-```http
-GET http://127.0.0.1:8000/users/1
-```
-
-![GET /users/id](image/get_user_by_id.png)
-
----
-
-### GET /users?role=admin
-
-```http
-GET http://127.0.0.1:8000/users?role=admin
-```
-
-![GET por rol](image/get_users_by_role.png)
-
----
-
-### GET /users?is_active=false
-
-```http
-GET http://127.0.0.1:8000/users?is_active=false
-```
-
-![GET por estado](image/get_users_by_status.png)
-
----
-
-### POST /users
-
-Body:
-```json
-{
-  "name": "Aleja Torres",
-  "email": "aleja@mail.com",
-  "role": "user",
-  "is_active": true
-}
-```
-
-Respuesta exitosa (201):
-```json
-{
-  "id": 1,
-  "name": "Aleja Torres",
-  "email": "aleja@mail.com",
-  "role": "user",
-  "is_active": true,
-  "created_at": "2024-01-15T10:30:00"
-}
-```
-
-![POST exitoso](image/post_user_success.png)
-
----
-
-### PUT /users/{user_id}
-
-Body:
-```json
-{
-  "name": "Aleja Torres Updated",
-  "email": "aleja_updated@mail.com",
-  "role": "support",
-  "is_active": true
-}
-```
-
-![PUT usuario](image/put_user.png)
-
----
-
-### PATCH /users/{user_id}
-
-Body (solo los campos que quieres cambiar):
-```json
-{
-  "role": "support"
-}
-```
-
-![PATCH usuario](image/patch_user.png)
-
----
-
-### DELETE /users/{user_id}
-
-```http
-DELETE http://127.0.0.1:8000/users/1
-```
-
-Responde con 204 y sin cuerpo.
-
-![DELETE usuario](image/delete_user.png)
-
----
-
-## Errores controlados
-
-### Usuario no encontrado (404)
+### 2. Crear el prestamo
 
 ```json
 {
-  "detail": "Usuario no encontrado"
+  "user_id": 1,
+  "device_id": 1
 }
 ```
 
-![Error 404](image/error_404.png)
+![Crear prestamo](image/create_loan.png)
 
----
+### 3. Verificar que el dispositivo quedo ocupado
 
-### Correo duplicado (400)
+`GET /devices/1` debe mostrar `"is_available": false`.
+
+![Dispositivo ocupado](image/device_unavailable.png)
+
+### 4. Intentar prestar el mismo dispositivo otra vez (409)
 
 ```json
 {
-  "detail": "El correo ya esta registrado"
+  "detail": "El dispositivo no esta disponible para prestamo"
 }
 ```
 
-![Error 400 duplicado](image/error_400_duplicate.png)
+![Error 409 dispositivo no disponible](image/error_409_device.png)
 
----
+### 5. Devolver el dispositivo
 
-### PATCH sin campos (400)
+`PATCH /loans/1/return`
+
+![Devolver prestamo](image/return_loan.png)
+
+### 6. Verificar que el dispositivo quedo libre otra vez
+
+`GET /devices/1` debe mostrar `"is_available": true`.
+
+![Dispositivo disponible](image/device_available.png)
+
+### 7. Intentar devolver un prestamo ya devuelto (409)
 
 ```json
 {
-  "detail": "Debes enviar al menos un campo para actualizar"
+  "detail": "Este prestamo ya fue devuelto"
 }
 ```
 
-![Error 400 patch vacio](image/error_400_patch.png)
+![Error 409 prestamo ya devuelto](image/error_409_loan.png)
 
 ---
 
-### Datos invalidos (422)
+## Consultas con joins
+
+### Prestamos con informacion de usuario y dispositivo
+
+`GET /loans/details`
+
+```json
+[
+  {
+    "id": 1,
+    "status": "returned",
+    "loan_date": "2024-01-15T10:30:00",
+    "return_date": "2024-01-20T15:00:00",
+    "user": {
+      "id": 1,
+      "name": "Ana Perez",
+      "email": "ana@mail.com"
+    },
+    "device": {
+      "id": 1,
+      "name": "Laptop Lenovo ThinkPad",
+      "serial_number": "LEN-2024-001",
+      "device_type": "laptop"
+    }
+  }
+]
+```
+
+![GET loans details](image/loans_details.png)
+
+### Filtrar prestamos por estado
+
+`GET /loans/details?status=active`
+
+![Filtro por estado](image/loans_filter_status.png)
+
+### Filtrar prestamos por tipo de dispositivo
+
+`GET /loans/details?device_type=laptop`
+
+![Filtro por tipo de dispositivo](image/loans_filter_device_type.png)
+
+### Consultar prestamos de un usuario
+
+`GET /users/1/loans`
+
+![Prestamos de un usuario](image/user_loans.png)
+
+### Consultar historial de un dispositivo
+
+`GET /devices/1/loans`
+
+![Historial de un dispositivo](image/device_loans.png)
+
+---
+
+## Filtro invalido (422)
+
+`GET /loans?status=inventado`
 
 ```json
 {
   "detail": [
     {
-      "type": "string_too_short",
-      "loc": ["body", "name"],
-      "msg": "String should have at least 3 characters"
+      "type": "enum",
+      "loc": ["query", "status"],
+      "msg": "Input should be 'active', 'returned' or 'overdue'"
     }
   ]
 }
 ```
 
-![Error 422](image/error_422.png)
+![Error 422 filtro invalido](image/error_422_filter.png)
 
 ---
 
-## Capturas de Swagger UI y ReDoc
+## Capturas de Swagger UI
 
 ![Swagger UI](image/swagger_ui.png)
 
-![ReDoc](image/redoc.png)
-
-![Cabeceras personalizadas](image/custom_headers.png)
+Los endpoints estan organizados por tags: **Users**, **Devices** y **Loans**.
 
 ---
 
-## Captura de la base de datos generada
+## Como funcionan los joins en este proyecto
 
-![Base de datos](image/database.png)
+Las consultas con joins usan tres herramientas principales de SQLAlchemy:
 
----
-
-## Como funciona la sesion de base de datos
-
-Cada request recibe su propia sesion de base de datos gracias a la dependencia `get_db`.
-FastAPI la crea antes de entrar al endpoint, la pasa como parametro y la cierra automaticamente
-cuando el request termina, sin importar si hubo error o no. Esto garantiza que no queden
-conexiones abiertas consumiendo recursos.
+`joinedload()` precarga las relaciones `user` y `device` de cada prestamo en la misma
+consulta SQL, evitando que se dispare una query adicional cada vez que se accede a
+`loan.user` o `loan.device`.
 
 ```python
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+query = db.query(Loan).options(joinedload(Loan.user), joinedload(Loan.device))
 ```
+
+`.join()` conecta explicitamente las tablas para poder filtrar por columnas de `User`
+o `Device` dentro de la misma consulta de `Loan`.
+
+```python
+query = query.join(User, Loan.user_id == User.id).join(Device, Loan.device_id == Device.id)
+```
+
+`and_()` combina varias condiciones de filtro de forma dinamica, solo se agregan las
+condiciones que el cliente realmente envio.
+
+```python
+if conditions:
+    query = query.where(and_(*conditions))
+```
+
+`ilike()` permite busquedas de texto parcial sin importar mayusculas o minusculas,
+usado tanto en el filtro de dispositivos como en el filtro por email de usuario.
+
+---
+
+## Reglas de negocio en prestamos
+
+El endpoint `POST /loans` valida en cadena: que el usuario exista, que el dispositivo
+exista, y que el dispositivo este disponible. Si todo pasa, crea el prestamo y marca
+el dispositivo como no disponible, todo en la misma transaccion.
+
+El endpoint `PATCH /loans/{loan_id}/return` valida que el prestamo no haya sido
+devuelto previamente. Si pasa, marca el estado como `returned`, asigna la fecha de
+devolucion y libera el dispositivo.
+
+El codigo 409 se usa especificamente para estos casos porque la peticion en si es
+valida, el conflicto esta en el estado actual del recurso, no en los datos enviados.
 
 ---
 
 ## Reflexion
 
-Pasar de datos en memoria a una base de datos real cambia completamente la naturaleza del proyecto.
-Con listas, los datos desaparecen cada vez que el servidor se reinicia. Con SQLAlchemy y SQLite,
-los datos persisten en disco y sobreviven cualquier reinicio. El ORM hace que trabajar con la base
-de datos se sienta natural en Python, sin escribir SQL directamente. La separacion entre el modelo
-SQLAlchemy y el schema Pydantic mantiene el codigo limpio: cada uno hace su trabajo sin meterse
-en el del otro. SQLAlchemy habla con la BD, Pydantic habla con el cliente, y FastAPI los conecta.
+Pasar de un CRUD simple de usuarios a un sistema con tres entidades relacionadas cambia
+por completo la complejidad del proyecto. Las migraciones con Alembic resuelven un
+problema real: sin ellas, cualquier cambio en los modelos significa borrar la base de
+datos y perder los datos, algo inaceptable en un entorno real. Versionar los cambios
+permite evolucionar el esquema sin perder informacion y sin que distintos entornos
+queden desincronizados.
+
+Las relaciones con `relationship()` y `back_populates` simplifican mucho el acceso a
+datos conectados, evitando escribir joins manuales en cada consulta. Y cuando si se
+necesita un join explicito, como en las consultas con filtros avanzados, SQLAlchemy
+ofrece herramientas claras y expresivas con `join()`, `where()`, `and_()` e `ilike()`.
+
+La regla de negocio de disponibilidad de dispositivos fue el reto mas interesante:
+entender por que un 409 es mas correcto que un 400 para un conflicto de estado, y
+como una sola transaccion puede actualizar dos tablas relacionadas de forma consistente,
+fue clave para construir una API que se comporta de forma predecible.
 
