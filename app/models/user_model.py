@@ -1,4 +1,5 @@
 from sqlalchemy import Column, Integer, String, Boolean, DateTime
+from sqlalchemy.orm import relationship
 from datetime import datetime
 from app.database.connection import Base
 
@@ -25,3 +26,6 @@ class User(Base):
 
     # Fecha de creacion, se asigna automaticamente al momento de crear el usuario
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    # Relacion uno a muchos, un usuario puede tener muchos prestamos
+    loans = relationship("Loan", back_populates="user")
