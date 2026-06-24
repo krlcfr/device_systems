@@ -12,6 +12,8 @@ from app.services.user_service import (
     delete_user,
 )
 from app.dependencies.database_dependency import get_db
+from app.schemas.loan_schema import LoanDetailResponse
+from app.services.loan_service import get_loans_by_user
 
 router = APIRouter(prefix="/users", tags=["Users"])
 
@@ -104,3 +106,17 @@ def patch_user(user_id: int, data: UserPartialUpdate, response: Response, db: Se
 )
 def remove_user(user_id: int, db: Session = Depends(get_db)):
     delete_user(db, user_id)
+
+
+# Devuelve los prestamos asociados a un usuario, con detalle del dispositivo
+@router.get(
+    "/{user_id}/loans",
+    response_model=list[LoanDetailResponse],
+    tags=["Loans"],
+    summary="Prestamos de un usuario",
+    description="Devuelve el historial de prestamos de un usuario especifico, con la informacion del dispositivo de cada prestamo. Si el usuario no existe responde con 404.",
+    response_description="Lista de prestamos del usuario",
+)
+def get_user_loans(user_id: int, response: Response, db: Session = Depends(get_db)):
+    set_custom_headers(response)
+    return get_loans_by_user(db, user_id)
