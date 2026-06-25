@@ -18,6 +18,10 @@ class User(Base):
     # Email obligatorio y unico, no pueden existir dos usuarios con el mismo correo
     email = Column(String(255), unique=True, nullable=False, index=True)
 
+    # Hash de la contraseña generado con passlib, nunca se guarda en texto plano
+    # server_default vacio evita romper filas existentes creadas antes de esta columna
+    hashed_password = Column(String(255), nullable=False, server_default="")
+
     # Rol obligatorio, la validacion de valores permitidos la maneja Pydantic
     role = Column(String(50), nullable=False)
 
