@@ -1,7 +1,8 @@
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, Response, Request
 from sqlalchemy.orm import Session
 from typing import Optional
 
+from app.config import limiter
 from app.schemas.loan_schema import LoanCreate, LoanResponse, LoanDetailResponse, LoanStatus
 from app.services.loan_service import (
     get_all_loans,
@@ -17,13 +18,11 @@ from app.models.user_model import User
 router = APIRouter(prefix="/loans", tags=["Loans"])
 
 
-# Funcion auxiliar que agrega las cabeceras personalizadas a cualquier respuesta
 def set_custom_headers(response: Response):
-    response.headers["X-App-Name"] = "device_systems"
+    """Cabeceras por respuesta (X-API-Version especifica)."""
     response.headers["X-API-Version"] = "4.0"
 
 
-# Devuelve todos los prestamos con filtros opcionales por estado, usuario o dispositivo
 @router.get(
     "/",
     response_model=list[LoanResponse],
@@ -42,8 +41,6 @@ def get_loans(
     return get_all_loans(db, status=status, user_id=user_id, device_id=device_id)
 
 
-# Devuelve los prestamos con informacion completa de usuario y dispositivo
-# se declara antes de /{loan_id} para que "details" no se confunda con un id
 @router.get(
     "/details",
     response_model=list[LoanDetailResponse],
@@ -63,7 +60,6 @@ def get_loan_details(
     return get_loans_with_details(db, status=status, user_email=user_email, device_type=device_type)
 
 
-# Devuelve un prestamo especifico por su id
 @router.get(
     "/{loan_id}",
     response_model=LoanResponse,
@@ -76,7 +72,6 @@ def get_loan(loan_id: int, response: Response, db: Session = Depends(get_db)):
     return get_loan_by_id(db, loan_id)
 
 
-# Crea un nuevo prestamo validando usuario, dispositivo y disponibilidad
 @router.post(
     "/",
     response_model=LoanResponse,
@@ -85,12 +80,18 @@ def get_loan(loan_id: int, response: Response, db: Session = Depends(get_db)):
     description="Registra un nuevo prestamo. Valida que el usuario y el dispositivo existan y que el dispositivo este disponible.",
     response_description="Prestamo creado exitosamente",
 )
-def post_loan(loan: LoanCreate, response: Response, db: Session = Depends(get_db), current_user: User = Depends(get_current_active_user)):
+@limiter.limit("10/minute")
+def post_loan(
+    request: Request,
+    loan: LoanCreate,
+    response: Response,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
     set_custom_headers(response)
     return create_loan(db, loan)
 
 
-# Marca un prestamo como devuelto y libera el dispositivo
 @router.patch(
     "/{loan_id}/return",
     response_model=LoanResponse,
@@ -98,6 +99,11 @@ def post_loan(loan: LoanCreate, response: Response, db: Session = Depends(get_db
     description="Marca el prestamo como devuelto, asigna la fecha de devolucion y libera el dispositivo. Si el prestamo ya fue devuelto responde con 409.",
     response_description="Prestamo devuelto exitosamente",
 )
-def patch_return_loan(loan_id: int, response: Response, db: Session = Depends(get_db), current_user: User = Depends(require_role("admin", "support"))):
+def patch_return_loan(
+    loan_id: int,
+    response: Response,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role("admin", "support")),
+):
     set_custom_headers(response)
     return return_loan(db, loan_id)

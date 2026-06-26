@@ -1,7 +1,8 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 
+from app.config import limiter
 from app.schemas.auth_schema import UserRegister, Token
 from app.schemas.user_schema import UserResponse
 from app.auth.auth_service import register_user, authenticate_user
@@ -13,7 +14,6 @@ from app.models.user_model import User
 router = APIRouter(prefix="/auth", tags=["Auth"])
 
 
-# Registra un usuario nuevo con contraseña hasheada
 @router.post(
     "/register",
     response_model=UserResponse,
@@ -22,13 +22,11 @@ router = APIRouter(prefix="/auth", tags=["Auth"])
     description="Crea un usuario nuevo validando nombre, email unico, contrasena segura y rol permitido. La contrasena se guarda siempre hasheada.",
     response_description="Usuario registrado exitosamente",
 )
-def register(data: UserRegister, db: Session = Depends(get_db)):
+@limiter.limit("3/minute")
+def register(request: Request, data: UserRegister, db: Session = Depends(get_db)):
     return register_user(db, data)
 
 
-# Autentica al usuario y devuelve un token JWT
-# OAuth2PasswordRequestForm exige los campos username y password en un formulario
-# usamos el campo username para recibir el email del usuario
 @router.post(
     "/login",
     response_model=Token,
@@ -36,7 +34,12 @@ def register(data: UserRegister, db: Session = Depends(get_db)):
     description="Autentica al usuario con email y contrasena, y devuelve un token JWT de acceso.",
     response_description="Token de acceso generado",
 )
-def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+@limiter.limit("5/minute")
+def login(
+    request: Request,
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    db: Session = Depends(get_db),
+):
     user = authenticate_user(db, form_data.username, form_data.password)
 
     if not user:
@@ -46,13 +49,11 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    # El sub del token es el id del usuario, asi get_current_user puede recuperarlo despues
     access_token = create_access_token(data={"sub": str(user.id)})
 
     return {"access_token": access_token, "token_type": "bearer"}
 
 
-# Devuelve los datos del usuario autenticado a partir del token
 @router.get(
     "/me",
     response_model=UserResponse,

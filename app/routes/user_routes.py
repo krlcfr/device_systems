@@ -1,7 +1,8 @@
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, Response, Request
 from sqlalchemy.orm import Session
 from typing import Optional
 
+from app.config import limiter
 from app.schemas.user_schema import UserCreate, UserUpdate, UserPartialUpdate, UserResponse, UserRole
 from app.services.user_service import (
     get_all_users,
@@ -20,13 +21,11 @@ from app.services.loan_service import get_loans_by_user
 router = APIRouter(prefix="/users", tags=["Users"])
 
 
-# Funcion auxiliar que agrega las cabeceras personalizadas a cualquier respuesta
 def set_custom_headers(response: Response):
-    response.headers["X-App-Name"] = "device_systems"
+    """Cabeceras por respuesta (X-API-Version especifica)."""
     response.headers["X-API-Version"] = "3.0"
 
 
-# Devuelve todos los usuarios con filtros opcionales y orden configurable
 @router.get(
     "/",
     response_model=list[UserResponse],
@@ -34,7 +33,9 @@ def set_custom_headers(response: Response):
     description="Devuelve la lista de usuarios. Permite filtrar por rol y estado, y ordenar por nombre o fecha de creacion.",
     response_description="Lista de usuarios encontrados",
 )
+@limiter.limit("30/minute")
 def get_users(
+    request: Request,
     response: Response,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
@@ -46,7 +47,6 @@ def get_users(
     return get_all_users(db, role=role, is_active=is_active, order_by=order_by)
 
 
-# Devuelve un usuario especifico por su id
 @router.get(
     "/{user_id}",
     response_model=UserResponse,
@@ -54,12 +54,16 @@ def get_users(
     description="Busca y devuelve un usuario por su ID. Si no existe responde con 404.",
     response_description="Usuario encontrado",
 )
-def get_user(user_id: int, response: Response, db: Session = Depends(get_db), current_user: User = Depends(get_current_active_user)):
+def get_user(
+    user_id: int,
+    response: Response,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
     set_custom_headers(response)
     return get_user_by_id(db, user_id)
 
 
-# Crea un nuevo usuario en la base de datos
 @router.post(
     "/",
     response_model=UserResponse,
@@ -73,7 +77,6 @@ def post_user(user: UserCreate, response: Response, db: Session = Depends(get_db
     return create_user(db, user)
 
 
-# Reemplaza completamente un usuario existente
 @router.put(
     "/{user_id}",
     response_model=UserResponse,
@@ -81,12 +84,16 @@ def post_user(user: UserCreate, response: Response, db: Session = Depends(get_db
     description="Reemplaza todos los campos de un usuario existente. Si no existe responde con 404.",
     response_description="Usuario actualizado",
 )
-def put_user(user_id: int, data: UserUpdate, response: Response, db: Session = Depends(get_db)):
+def put_user(
+    user_id: int,
+    data: UserUpdate,
+    response: Response,
+    db: Session = Depends(get_db),
+):
     set_custom_headers(response)
     return update_user(db, user_id, data)
 
 
-# Actualiza parcialmente un usuario, solo los campos que el cliente manda
 @router.patch(
     "/{user_id}",
     response_model=UserResponse,
@@ -94,12 +101,16 @@ def put_user(user_id: int, data: UserUpdate, response: Response, db: Session = D
     description="Modifica solo los campos enviados. Si no se envia ningun campo responde con 400. Si no existe responde con 404.",
     response_description="Usuario actualizado parcialmente",
 )
-def patch_user(user_id: int, data: UserPartialUpdate, response: Response, db: Session = Depends(get_db)):
+def patch_user(
+    user_id: int,
+    data: UserPartialUpdate,
+    response: Response,
+    db: Session = Depends(get_db),
+):
     set_custom_headers(response)
     return partial_update_user(db, user_id, data)
 
 
-# Elimina un usuario existente y responde con 204 sin cuerpo
 @router.delete(
     "/{user_id}",
     status_code=204,
@@ -111,7 +122,6 @@ def remove_user(user_id: int, db: Session = Depends(get_db)):
     delete_user(db, user_id)
 
 
-# Devuelve los prestamos asociados a un usuario, con detalle del dispositivo
 @router.get(
     "/{user_id}/loans",
     response_model=list[LoanDetailResponse],
@@ -120,6 +130,10 @@ def remove_user(user_id: int, db: Session = Depends(get_db)):
     description="Devuelve el historial de prestamos de un usuario especifico, con la informacion del dispositivo de cada prestamo. Si el usuario no existe responde con 404.",
     response_description="Lista de prestamos del usuario",
 )
-def get_user_loans(user_id: int, response: Response, db: Session = Depends(get_db)):
+def get_user_loans(
+    user_id: int,
+    response: Response,
+    db: Session = Depends(get_db),
+):
     set_custom_headers(response)
     return get_loans_by_user(db, user_id)
