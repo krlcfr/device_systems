@@ -12,6 +12,8 @@ from app.services.device_service import (
     delete_device,
 )
 from app.dependencies.database_dependency import get_db
+from app.dependencies.auth_dependency import require_role, require_admin
+from app.models.user_model import User
 from app.schemas.loan_schema import LoanDetailResponse
 from app.services.loan_service import get_loans_by_device
 
@@ -66,7 +68,7 @@ def get_device(device_id: int, response: Response, db: Session = Depends(get_db)
     description="Registra un nuevo dispositivo. Valida que el numero de serie no este duplicado.",
     response_description="Dispositivo creado exitosamente",
 )
-def post_device(device: DeviceCreate, response: Response, db: Session = Depends(get_db)):
+def post_device(device: DeviceCreate, response: Response, db: Session = Depends(get_db), current_user: User = Depends(require_role("admin", "support"))):
     set_custom_headers(response)
     return create_device(db, device)
 
@@ -79,7 +81,7 @@ def post_device(device: DeviceCreate, response: Response, db: Session = Depends(
     description="Reemplaza todos los campos de un dispositivo existente. Si no existe responde con 404.",
     response_description="Dispositivo actualizado",
 )
-def put_device(device_id: int, data: DeviceUpdate, response: Response, db: Session = Depends(get_db)):
+def put_device(device_id: int, data: DeviceUpdate, response: Response, db: Session = Depends(get_db), current_user: User = Depends(require_role("admin", "support"))):
     set_custom_headers(response)
     return update_device(db, device_id, data)
 
@@ -105,7 +107,7 @@ def patch_device(device_id: int, data: DevicePartialUpdate, response: Response, 
     description="Elimina un dispositivo por su ID. Si no existe responde con 404.",
     response_description="Dispositivo eliminado exitosamente",
 )
-def remove_device(device_id: int, db: Session = Depends(get_db)):
+def remove_device(device_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
     delete_device(db, device_id)
 
 

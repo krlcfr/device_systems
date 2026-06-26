@@ -11,6 +11,8 @@ from app.services.loan_service import (
     get_loans_with_details,
 )
 from app.dependencies.database_dependency import get_db
+from app.dependencies.auth_dependency import get_current_active_user, require_role
+from app.models.user_model import User
 
 router = APIRouter(prefix="/loans", tags=["Loans"])
 
@@ -52,6 +54,7 @@ def get_loans(
 def get_loan_details(
     response: Response,
     db: Session = Depends(get_db),
+    current_user: User = Depends(require_role("admin", "support")),
     status: Optional[LoanStatus] = None,
     user_email: Optional[str] = None,
     device_type: Optional[str] = None,
@@ -82,7 +85,7 @@ def get_loan(loan_id: int, response: Response, db: Session = Depends(get_db)):
     description="Registra un nuevo prestamo. Valida que el usuario y el dispositivo existan y que el dispositivo este disponible.",
     response_description="Prestamo creado exitosamente",
 )
-def post_loan(loan: LoanCreate, response: Response, db: Session = Depends(get_db)):
+def post_loan(loan: LoanCreate, response: Response, db: Session = Depends(get_db), current_user: User = Depends(get_current_active_user)):
     set_custom_headers(response)
     return create_loan(db, loan)
 
@@ -95,6 +98,6 @@ def post_loan(loan: LoanCreate, response: Response, db: Session = Depends(get_db
     description="Marca el prestamo como devuelto, asigna la fecha de devolucion y libera el dispositivo. Si el prestamo ya fue devuelto responde con 409.",
     response_description="Prestamo devuelto exitosamente",
 )
-def patch_return_loan(loan_id: int, response: Response, db: Session = Depends(get_db)):
+def patch_return_loan(loan_id: int, response: Response, db: Session = Depends(get_db), current_user: User = Depends(require_role("admin", "support"))):
     set_custom_headers(response)
     return return_loan(db, loan_id)

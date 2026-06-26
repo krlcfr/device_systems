@@ -12,6 +12,8 @@ from app.services.user_service import (
     delete_user,
 )
 from app.dependencies.database_dependency import get_db
+from app.dependencies.auth_dependency import get_current_active_user
+from app.models.user_model import User
 from app.schemas.loan_schema import LoanDetailResponse
 from app.services.loan_service import get_loans_by_user
 
@@ -35,6 +37,7 @@ def set_custom_headers(response: Response):
 def get_users(
     response: Response,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
     role: Optional[UserRole] = None,
     is_active: Optional[bool] = None,
     order_by: Optional[str] = "name",
@@ -51,7 +54,7 @@ def get_users(
     description="Busca y devuelve un usuario por su ID. Si no existe responde con 404.",
     response_description="Usuario encontrado",
 )
-def get_user(user_id: int, response: Response, db: Session = Depends(get_db)):
+def get_user(user_id: int, response: Response, db: Session = Depends(get_db), current_user: User = Depends(get_current_active_user)):
     set_custom_headers(response)
     return get_user_by_id(db, user_id)
 
