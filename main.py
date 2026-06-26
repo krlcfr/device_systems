@@ -1,7 +1,9 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from app.routes.user_routes import router as user_router
 from app.routes.device_routes import router as device_router
 from app.routes.loan_routes import router as loan_router
+from app.auth.auth_routes import router as auth_router
 from app.database.connection import create_tables
 
 description = """
@@ -54,7 +56,23 @@ app = FastAPI(
 # las tablas ya gestionadas por Alembic tambien pasan por aqui sin problema
 create_tables()
 
+# Configuracion CORS para desarrollo
+# allow_origins lista los frontends autorizados a consumir esta API desde el navegador
+# allow_credentials en True permite que el frontend envie cookies o el header Authorization
+# en produccion estos origenes deben ser los dominios reales del frontend, nunca "*"
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://localhost:3000",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # Conecta las rutas de usuarios, dispositivos y prestamos a la aplicacion principal
+app.include_router(auth_router)
 app.include_router(user_router)
 app.include_router(device_router)
 app.include_router(loan_router)
