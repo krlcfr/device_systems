@@ -1,29 +1,33 @@
 # device_systems
 
-API REST construida con FastAPI, SQLAlchemy y Alembic para gestionar usuarios, dispositivos
-y prestamos en el sistema device_systems. Esta es la version 4.0 del proyecto, donde se
-agregaron relaciones entre modelos, migraciones controladas con Alembic y consultas
-avanzadas con joins y filtros.
+API REST construida con FastAPI, SQLAlchemy, Alembic y JWT para gestionar usuarios,
+dispositivos y prestamos del sistema device_systems. Esta es la version 4.0.0, que cierra
+el proyecto agregando autenticacion OAuth2 + JWT, autorizacion por roles, middleware
+personalizado, CORS, rate limiting y manejo centralizado de configuracion.
 
 ---
 
 ## Que hace este proyecto
 
-device_systems permite administrar tres recursos relacionados entre si: usuarios, dispositivos
-tecnologicos y los prestamos que los conectan. Un usuario puede solicitar el prestamo de un
-dispositivo disponible, y al devolverlo el dispositivo vuelve a quedar libre para otro prestamo.
-La API valida automaticamente los datos, aplica reglas de negocio sobre disponibilidad y permite
-consultar la informacion combinada entre las tres tablas mediante joins.
+device_systems administra tres recursos relacionados (usuarios, dispositivos y prestamos)
+detras de una capa de seguridad real. Nadie puede consultar o modificar datos sensibles sin
+autenticarse con un token JWT, y cada accion respeta el rol del usuario que la solicita.
+Ademas, cada peticion queda registrada con un identificador unico y su tiempo de respuesta,
+y existen limites de frecuencia para evitar abuso sobre los endpoints mas sensibles.
 
 ---
 
 ## Tecnologias utilizadas
 
-- Python 3.13
+- Python 3.14
 - FastAPI
 - SQLAlchemy
 - Alembic
 - Pydantic v2
+- python-jose (JWT)
+- passlib + bcrypt (hash de contrasenas)
+- slowapi (rate limiting)
+- python-dotenv (variables de entorno)
 - SQLite
 - Uvicorn
 - uv como gestor de paquetes
@@ -35,11 +39,38 @@ consultar la informacion combinada entre las tres tablas mediante joins.
 ```bash
 git clone <url-del-repositorio>
 cd device_systems
-git checkout device_systems_alembic_relaciones
+git checkout device_systems_security
 uv sync
 ```
 
 Las dependencias del proyecto estan definidas en `pyproject.toml`, gestionadas con `uv`.
+Tambien se incluye un `requirements.txt` como referencia para entornos que usen `pip`.
+
+---
+
+## Configuracion de variables de entorno
+
+Copia el archivo de ejemplo y ajusta los valores segun tu entorno:
+
+```bash
+cp .env.example .env
+```
+
+```env
+# Clave secreta para firmar los tokens JWT
+# En produccion, genera una clave fuerte con: openssl rand -hex 32
+SECRET_KEY=device-systems-secret-key-cambiar-en-produccion
+
+# URL de la base de datos
+DATABASE_URL=sqlite:///./device_systems.db
+
+# Tiempo de expiracion del token JWT en minutos
+ACCESS_TOKEN_EXPIRE_MINUTES=30
+```
+
+`SECRET_KEY` nunca debe quedar hardcodeada ni subirse a un repositorio publico con su valor
+real. El valor por defecto en el codigo solo existe para que el proyecto funcione sin
+configuracion adicional en un entorno de practica.
 
 ---
 
@@ -62,18 +93,27 @@ Una vez corriendo lo encuentras en:
 ```
 device_systems/
 ├── app/
+│   ├── auth/
+│   │   ├── security.py          # Hash de contrasenas y manejo de JWT
+│   │   ├── auth_service.py      # Logica de registro y autenticacion
+│   │   └── auth_routes.py       # Endpoints /auth/register, /auth/login, /auth/me
+│   ├── config.py                 # Variables de entorno, logging y limiter centralizados
 │   ├── database/
-│   │   └── connection.py        # Engine, SessionLocal y Base declarativa
+│   │   └── connection.py
 │   ├── dependencies/
-│   │   └── database_dependency.py
+│   │   ├── database_dependency.py
+│   │   └── auth_dependency.py   # get_current_user, get_current_active_user, require_role
+│   ├── middlewares/
+│   │   └── request_middleware.py # Logging, X-Request-ID y X-Process-Time
 │   ├── models/
-│   │   ├── user_model.py        # Modelo User, relacion con Loan
-│   │   ├── device_model.py      # Modelo Device, relacion con Loan
-│   │   └── loan_model.py        # Modelo Loan, relacion con User y Device
+│   │   ├── user_model.py        # Incluye hashed_password
+│   │   ├── device_model.py
+│   │   └── loan_model.py
 │   ├── schemas/
+│   │   ├── auth_schema.py       # UserRegister, UserLogin, Token, TokenData
 │   │   ├── user_schema.py
 │   │   ├── device_schema.py
-│   │   └── loan_schema.py       # Incluye LoanDetailResponse para joins
+│   │   └── loan_schema.py
 │   ├── routes/
 │   │   ├── user_routes.py
 │   │   ├── device_routes.py
@@ -81,166 +121,143 @@ device_systems/
 │   └── services/
 │       ├── user_service.py
 │       ├── device_service.py
-│       └── loan_service.py      # Logica de negocio y consultas con joins
+│       └── loan_service.py
 ├── alembic/
-│   ├── versions/                # Migraciones generadas
-│   └── env.py                   # Configurado para reconocer los 3 modelos
-├── alembic.ini
+│   └── versions/                # Incluye la migracion de hashed_password
+├── tests/
+├── .env.example
 ├── main.py
 ├── pyproject.toml
-├── device_systems.db
+├── requirements.txt
 └── README.md
 ```
 
 ---
 
-## Modelo de datos y relaciones
+## Autenticacion con OAuth2 + JWT
 
-```
-User (1) ----< (N) Loan (N) >---- (1) Device
-```
+### Flujo general
 
-Un usuario puede tener muchos prestamos. Un dispositivo puede aparecer en muchos prestamos
-historicos. Cada prestamo pertenece exactamente a un usuario y a un dispositivo.
+1. El usuario se registra en `POST /auth/register` con nombre, email, contrasena y rol
+2. La contrasena se valida (minimo 8 caracteres, mayuscula, minuscula, numero, sin espacios)
+   y se guarda como un hash bcrypt, nunca en texto plano
+3. El usuario inicia sesion en `POST /auth/login` con email y contrasena
+4. Si las credenciales son correctas, la API devuelve un `access_token` JWT
+5. El cliente envia ese token en el header `Authorization: Bearer <token>` en cada peticion
+   a una ruta protegida
+6. La API decodifica el token, identifica al usuario y valida su rol antes de ejecutar la accion
 
-Las relaciones se definen con `ForeignKey()` para las columnas reales en la base de datos,
-y con `relationship()` mas `back_populates` para navegar entre objetos en Python sin
-escribir consultas manuales:
+### Por que la contrasena nunca se guarda en texto plano
+
+Si la base de datos se filtra o alguien obtiene acceso indebido, las contrasenas en texto
+plano quedarian expuestas inmediatamente. Con un hash bcrypt, incluso quien tenga acceso a
+la base de datos no puede recuperar la contrasena original, solo puede verificar si una
+contrasena ingresada coincide con el hash, gracias a `verify_password()`.
+
+### Por que se usa JWT en vez de sesiones tradicionales
+
+Un JWT es auto-contenido: toda la informacion necesaria para validar al usuario (su id y
+la fecha de expiracion) viaja dentro del propio token, firmado digitalmente. Esto evita que
+el servidor tenga que guardar el estado de cada sesion activa en memoria o en base de datos,
+lo que hace que la API sea mas facil de escalar horizontalmente.
+
+---
+
+## Autorizacion por roles
+
+| Rol       | Permisos                                                          |
+|-----------|--------------------------------------------------------------------|
+| admin     | Acceso total, incluyendo eliminar dispositivos                    |
+| support   | Gestionar dispositivos y prestamos, sin poder eliminar dispositivos|
+| user      | Consultar informacion y solicitar prestamos                        |
+
+### Rutas protegidas
+
+| Ruta                       | Proteccion           |
+|-----------------------------|------------------------|
+| GET /users                  | Usuario autenticado    |
+| GET /users/{user_id}        | Usuario autenticado    |
+| POST /devices                | Admin o support        |
+| PUT /devices/{device_id}     | Admin o support        |
+| DELETE /devices/{device_id}  | Solo admin             |
+| POST /loans                  | Usuario autenticado    |
+| PATCH /loans/{loan_id}/return| Admin o support        |
+| GET /loans/details           | Admin o support        |
+
+La logica de roles vive en `app/dependencies/auth_dependency.py`. `require_role(*roles)` es
+una fabrica de dependencias: genera la validacion exacta que cada ruta necesita sin tener
+que escribir una funcion distinta por cada combinacion de roles permitidos.
+
+---
+
+## Middleware personalizado
+
+`RequestLoggingMiddleware` se ejecuta en cada peticion, antes y despues de que la ruta
+correspondiente procese la solicitud. Agrega tres cabeceras a toda respuesta:
+
+| Cabecera         | Que contiene                                          |
+|-------------------|--------------------------------------------------------|
+| X-Request-ID      | Identificador unico de esa peticion especifica          |
+| X-Process-Time    | Tiempo en segundos que tomo procesar la peticion        |
+| X-App-Name        | Nombre de la aplicacion                                |
+
+Ademas registra en consola, para cada peticion: metodo HTTP, ruta, codigo de estado y
+duracion. Esto es la base de cualquier sistema de trazabilidad: si algo falla en produccion,
+el `X-Request-ID` permite rastrear esa peticion especifica en los logs sin tener que adivinar
+cual fue.
+
+---
+
+## CORS
+
+Configurado con `CORSMiddleware` permitiendo unicamente los origenes de desarrollo:
 
 ```python
-usuario.loans          # todos los prestamos de ese usuario
-dispositivo.loans      # todos los prestamos de ese dispositivo
-prestamo.user.name      # nombre del usuario del prestamo
-prestamo.device.name    # nombre del dispositivo del prestamo
+allow_origins=["http://localhost:5173", "http://localhost:3000"]
+allow_credentials=True
+allow_methods=["*"]
+allow_headers=["*"]
 ```
 
-![Diagrama de relaciones](image/relaciones.png)
+### Por que no usar `allow_origins=["*"]` en produccion
+
+Porque `allow_credentials=True` le dice al navegador que envie cookies y el header
+`Authorization` con cada peticion entre dominios. Si se combina con `"*"`, cualquier sitio
+web podria disparar peticiones autenticadas usando las credenciales que el navegador de la
+victima ya tiene guardadas, sin que la victima lo note. En produccion siempre se debe listar
+el dominio exacto del frontend autorizado.
 
 ---
 
-## Migraciones con Alembic
+## Rate limiting
 
-### Inicializacion
+Implementado con `slowapi`, limita la cantidad de peticiones por IP en una ventana de tiempo:
 
-```bash
-uv run alembic init alembic
-```
+| Endpoint              | Limite       |
+|-------------------------|---------------|
+| POST /auth/register     | 3 por minuto  |
+| POST /auth/login        | 5 por minuto  |
+| GET /users               | 30 por minuto |
+| POST /loans              | 10 por minuto |
 
-![alembic init](image/alembic_init.png)
-
-### Configuracion
-
-Se edito `alembic.ini` para apuntar a la base de datos del proyecto:
-
-```ini
-sqlalchemy.url = sqlite:///./device_systems.db
-```
-
-Y `alembic/env.py` para reconocer la Base declarativa y los tres modelos:
-
-```python
-from app.database.connection import Base
-from app.models.user_model import User
-from app.models.device_model import Device
-from app.models.loan_model import Loan
-
-target_metadata = Base.metadata
-```
-
-### Migracion inicial (baseline)
-
-Como la tabla `users` ya existia antes de instalar Alembic, se genero una migracion base
-y se marco como aplicada sin ejecutarla, para sincronizar el historial sin tocar los datos:
-
-```bash
-uv run alembic revision --autogenerate -m "baseline users table"
-uv run alembic stamp head
-```
-
-### Migracion de las tablas nuevas
-
-```bash
-uv run alembic revision --autogenerate -m "create devices and loans tables"
-```
-
-![alembic revision](image/alembic_revision.png)
-
-```bash
-uv run alembic upgrade head
-```
-
-![alembic upgrade](image/alembic_upgrade.png)
-
-### Historial de migraciones
-
-```bash
-uv run alembic history
-```
-
-![alembic history](image/alembic_history.png)
-
-```
-<base> -> f9b3ea0a77a4, baseline users table
-f9b3ea0a77a4 -> d9a68d1c2c56 (head), create devices and loans tables
-```
+Si se supera el limite, la API responde con codigo **429 Too Many Requests**. Este mecanismo
+protege especialmente el login y el registro, que son los blancos tipicos de ataques de
+fuerza bruta o de creacion masiva de cuentas falsas.
 
 ---
 
-## Estructura de tablas generadas
+## Limitaciones conocidas
 
-![Tablas en la base de datos](image/database_tables.png)
+Durante las pruebas se identifico que el endpoint `POST /auth/register` permite que
+cualquier persona se autoasigne el rol `admin` al registrarse, sin ningun tipo de
+restriccion. En un sistema en produccion esto es un riesgo serio: el rol de administrador
+nunca deberia poder auto-asignarse desde un registro publico, sino ser otorgado manualmente
+por otro administrador ya existente, por ejemplo mediante un endpoint adicional protegido
+con `require_admin` que permita cambiar el rol de un usuario.
 
----
-
-## Endpoints disponibles
-
-### Users
-
-| Metodo | Ruta                  | Que hace                                  |
-|--------|-----------------------|--------------------------------------------|
-| GET    | /users                | Lista usuarios con filtros                  |
-| GET    | /users/{user_id}      | Consulta un usuario por ID                  |
-| POST   | /users                | Crea un usuario                             |
-| PUT    | /users/{user_id}      | Reemplaza un usuario completo               |
-| PATCH  | /users/{user_id}      | Modifica campos especificos                 |
-| DELETE | /users/{user_id}      | Elimina un usuario                          |
-| GET    | /users/{user_id}/loans| Historial de prestamos de ese usuario       |
-
-### Devices
-
-| Metodo | Ruta                      | Que hace                              |
-|--------|---------------------------|----------------------------------------|
-| GET    | /devices                  | Lista dispositivos con filtros          |
-| GET    | /devices/{device_id}      | Consulta un dispositivo por ID          |
-| POST   | /devices                  | Crea un dispositivo                     |
-| PUT    | /devices/{device_id}      | Reemplaza un dispositivo completo       |
-| PATCH  | /devices/{device_id}      | Modifica campos especificos             |
-| DELETE | /devices/{device_id}      | Elimina un dispositivo                  |
-| GET    | /devices/{device_id}/loans| Historial de prestamos de ese dispositivo |
-
-Filtros disponibles en `/devices`:
-- `?device_type=laptop`
-- `?is_available=true`
-- `?brand=lenovo`
-- `?search=thinkpad` (busca en nombre, serial y marca)
-
-### Loans
-
-| Metodo | Ruta                    | Que hace                                          |
-|--------|--------------------------|----------------------------------------------------|
-| GET    | /loans                   | Lista prestamos con filtros                         |
-| GET    | /loans/details           | Lista prestamos con datos de usuario y dispositivo  |
-| GET    | /loans/{loan_id}         | Consulta un prestamo por ID                         |
-| POST   | /loans                   | Crea un prestamo, valida usuario y disponibilidad   |
-| PATCH  | /loans/{loan_id}/return  | Marca el prestamo como devuelto y libera el equipo  |
-
-Filtros disponibles:
-- `/loans?status=active`
-- `/loans?user_id=1`
-- `/loans?device_id=3`
-- `/loans/details?status=active`
-- `/loans/details?user_email=ana@mail.com`
-- `/loans/details?device_type=laptop`
+Para esta entrega academica se documenta como limitacion conocida en lugar de corregirse,
+ya que la tarea no especifico una restriccion de roles durante el registro, pero queda
+identificado como el siguiente paso de hardening natural del proyecto.
 
 ---
 
@@ -251,218 +268,123 @@ Filtros disponibles:
 | 200    | Operacion exitosa                                            |
 | 201    | Registro creado exitosamente                                 |
 | 204    | Eliminacion exitosa, sin cuerpo de respuesta                |
-| 400    | Dato duplicado (email o numero de serie) o PATCH vacio      |
+| 400    | Dato duplicado o datos invalidos                              |
+| 401    | No autenticado: token ausente, invalido o expirado            |
+| 403    | Autenticado pero sin permisos suficientes para la accion       |
 | 404    | Usuario, dispositivo o prestamo no encontrado                |
-| 409    | Dispositivo no disponible, o prestamo ya devuelto            |
-| 422    | Datos invalidos o filtro con valor fuera de lo permitido     |
+| 409    | Conflicto con el estado actual del recurso                    |
+| 422    | Error de validacion (datos o filtros invalidos)               |
+| 429    | Demasiadas solicitudes, limite de rate limiting alcanzado     |
 
 ---
 
-## Flujo completo de un prestamo
+## Flujo de prueba sugerido
 
-### 1. Crear usuario y dispositivo
-
-![Crear usuario](image/create_user.png)
-![Crear dispositivo](image/create_device.png)
-
-### 2. Crear el prestamo
+### 1. Registro y login
 
 ```json
+POST /auth/register
 {
-  "user_id": 1,
-  "device_id": 1
+  "name": "Ana Perez",
+  "email": "ana@mail.com",
+  "password": "Clave1234",
+  "role": "user"
 }
 ```
 
-![Crear prestamo](image/create_loan.png)
+```
+POST /auth/login
+username: ana@mail.com
+password: Clave1234
+```
 
-### 3. Verificar que el dispositivo quedo ocupado
+![Registro exitoso](image/register_success.png)
+![Login exitoso](image/login_success.png)
 
-`GET /devices/1` debe mostrar `"is_available": false`.
-
-![Dispositivo ocupado](image/device_unavailable.png)
-
-### 4. Intentar prestar el mismo dispositivo otra vez (409)
+### 2. Probar contrasena invalida en el registro
 
 ```json
 {
-  "detail": "El dispositivo no esta disponible para prestamo"
+  "name": "Test",
+  "email": "test@mail.com",
+  "password": "abc",
+  "role": "user"
 }
 ```
 
-![Error 409 dispositivo no disponible](image/error_409_device.png)
+Debe responder 422 explicando cuales reglas de seguridad no se cumplieron.
 
-### 5. Devolver el dispositivo
+![Error 422 contrasena invalida](image/error_422_password.png)
 
-`PATCH /loans/1/return`
+### 3. Acceder a una ruta protegida sin token
 
-![Devolver prestamo](image/return_loan.png)
-
-### 6. Verificar que el dispositivo quedo libre otra vez
-
-`GET /devices/1` debe mostrar `"is_available": true`.
-
-![Dispositivo disponible](image/device_available.png)
-
-### 7. Intentar devolver un prestamo ya devuelto (409)
-
-```json
-{
-  "detail": "Este prestamo ya fue devuelto"
-}
+```http
+GET /users
 ```
 
-![Error 409 prestamo ya devuelto](image/error_409_loan.png)
+Sin header Authorization, debe responder 401.
+
+![Error 401 sin token](image/error_401_no_token.png)
+
+### 4. Acceder con un rol sin permisos
+
+Con el token de un usuario rol `user`, intentar `POST /devices`. Debe responder 403.
+
+![Error 403 sin permisos](image/error_403_forbidden.png)
+
+### 5. Confirmar las cabeceras del middleware
+
+En cualquier respuesta, revisar los headers y confirmar la presencia de `X-Request-ID` y
+`X-Process-Time`.
+
+![Cabeceras del middleware](image/middleware_headers.png)
+
+### 6. Disparar el rate limit
+
+Ejecutar `POST /auth/login` mas de 5 veces en menos de un minuto. La sexta peticion debe
+responder 429.
+
+![Error 429 rate limit](image/error_429_rate_limit.png)
+
+### 7. Confirmar CORS
+
+Desde las DevTools del navegador, pestana Network, revisar que la respuesta incluya el
+header `access-control-allow-origin`.
+
+![Header CORS](image/cors_header.png)
 
 ---
 
-## Consultas con joins
+## Migraciones de Alembic en esta entrega
 
-### Prestamos con informacion de usuario y dispositivo
+Se agrego el campo `hashed_password` al modelo `User`. Como ya existian usuarios en la base
+de datos, la migracion usa un `server_default` vacio para no romper las filas existentes:
 
-`GET /loans/details`
-
-```json
-[
-  {
-    "id": 1,
-    "status": "returned",
-    "loan_date": "2024-01-15T10:30:00",
-    "return_date": "2024-01-20T15:00:00",
-    "user": {
-      "id": 1,
-      "name": "Ana Perez",
-      "email": "ana@mail.com"
-    },
-    "device": {
-      "id": 1,
-      "name": "Laptop Lenovo ThinkPad",
-      "serial_number": "LEN-2024-001",
-      "device_type": "laptop"
-    }
-  }
-]
+```bash
+uv run alembic revision --autogenerate -m "add authentication fields to users"
+uv run alembic upgrade head
 ```
 
-![GET loans details](image/loans_details.png)
-
-### Filtrar prestamos por estado
-
-`GET /loans/details?status=active`
-
-![Filtro por estado](image/loans_filter_status.png)
-
-### Filtrar prestamos por tipo de dispositivo
-
-`GET /loans/details?device_type=laptop`
-
-![Filtro por tipo de dispositivo](image/loans_filter_device_type.png)
-
-### Consultar prestamos de un usuario
-
-`GET /users/1/loans`
-
-![Prestamos de un usuario](image/user_loans.png)
-
-### Consultar historial de un dispositivo
-
-`GET /devices/1/loans`
-
-![Historial de un dispositivo](image/device_loans.png)
-
----
-
-## Filtro invalido (422)
-
-`GET /loans?status=inventado`
-
-```json
-{
-  "detail": [
-    {
-      "type": "enum",
-      "loc": ["query", "status"],
-      "msg": "Input should be 'active', 'returned' or 'overdue'"
-    }
-  ]
-}
-```
-
-![Error 422 filtro invalido](image/error_422_filter.png)
-
----
-
-## Capturas de Swagger UI
-
-![Swagger UI](image/swagger_ui.png)
-
-Los endpoints estan organizados por tags: **Users**, **Devices** y **Loans**.
-
----
-
-## Como funcionan los joins en este proyecto
-
-Las consultas con joins usan tres herramientas principales de SQLAlchemy:
-
-`joinedload()` precarga las relaciones `user` y `device` de cada prestamo en la misma
-consulta SQL, evitando que se dispare una query adicional cada vez que se accede a
-`loan.user` o `loan.device`.
-
-```python
-query = db.query(Loan).options(joinedload(Loan.user), joinedload(Loan.device))
-```
-
-`.join()` conecta explicitamente las tablas para poder filtrar por columnas de `User`
-o `Device` dentro de la misma consulta de `Loan`.
-
-```python
-query = query.join(User, Loan.user_id == User.id).join(Device, Loan.device_id == Device.id)
-```
-
-`and_()` combina varias condiciones de filtro de forma dinamica, solo se agregan las
-condiciones que el cliente realmente envio.
-
-```python
-if conditions:
-    query = query.where(and_(*conditions))
-```
-
-`ilike()` permite busquedas de texto parcial sin importar mayusculas o minusculas,
-usado tanto en el filtro de dispositivos como en el filtro por email de usuario.
-
----
-
-## Reglas de negocio en prestamos
-
-El endpoint `POST /loans` valida en cadena: que el usuario exista, que el dispositivo
-exista, y que el dispositivo este disponible. Si todo pasa, crea el prestamo y marca
-el dispositivo como no disponible, todo en la misma transaccion.
-
-El endpoint `PATCH /loans/{loan_id}/return` valida que el prestamo no haya sido
-devuelto previamente. Si pasa, marca el estado como `returned`, asigna la fecha de
-devolucion y libera el dispositivo.
-
-El codigo 409 se usa especificamente para estos casos porque la peticion en si es
-valida, el conflicto esta en el estado actual del recurso, no en los datos enviados.
+![Migracion de autenticacion](image/alembic_auth_migration.png)
 
 ---
 
 ## Reflexion
 
-Pasar de un CRUD simple de usuarios a un sistema con tres entidades relacionadas cambia
-por completo la complejidad del proyecto. Las migraciones con Alembic resuelven un
-problema real: sin ellas, cualquier cambio en los modelos significa borrar la base de
-datos y perder los datos, algo inaceptable en un entorno real. Versionar los cambios
-permite evolucionar el esquema sin perder informacion y sin que distintos entornos
-queden desincronizados.
+Esta ultima entrega fue donde el proyecto realmente se volvio una API lista para un entorno
+real. Hasta antes de esto, cualquiera con la URL podia leer o modificar cualquier dato. Con
+OAuth2 y JWT, cada peticion tiene que demostrar quien la hace, y con la autorizacion por
+roles, cada usuario solo puede hacer lo que su rol le permite, sin importar que tan bien
+formado este su request.
 
-Las relaciones con `relationship()` y `back_populates` simplifican mucho el acceso a
-datos conectados, evitando escribir joins manuales en cada consulta. Y cuando si se
-necesita un join explicito, como en las consultas con filtros avanzados, SQLAlchemy
-ofrece herramientas claras y expresivas con `join()`, `where()`, `and_()` e `ilike()`.
+El middleware personalizado y el sistema de logging muestran algo que rara vez se ensena en
+los primeros pasos de un curso: en produccion, el codigo que funciona no es suficiente, hay
+que poder *observar* lo que esta pasando cuando algo sale mal. Un `X-Request-ID` no evita
+errores, pero convierte un error invisible en uno rastreable.
 
-La regla de negocio de disponibilidad de dispositivos fue el reto mas interesante:
-entender por que un 409 es mas correcto que un 400 para un conflicto de estado, y
-como una sola transaccion puede actualizar dos tablas relacionadas de forma consistente,
-fue clave para construir una API que se comporta de forma predecible.
+El rate limiting y el CORS bien configurado son recordatorios de que seguridad no es un
+checkbox que se marca una vez, es una capa continua de decisiones: cuanta confianza le doy
+a un origen, cuantas peticiones le permito a una IP, que tan fuerte exijo que sea una
+contrasena. Cada una de esas decisiones tiene un trade-off entre seguridad y comodidad, y
+entender ese trade-off es mas importante que memorizar la sintaxis de cada libreria.
 
